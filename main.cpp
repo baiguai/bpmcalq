@@ -18,8 +18,9 @@
 #include <cmath>
 #include <algorithm>
 #include <filesystem>
+#include <fstream> // Added for file I/O
 #include <sndfile.h>
-#include <sndfile.h>
+
 #include <glibmm/ustring.h>
 
 class BPMCalculator : public Gtk::Window {
@@ -29,6 +30,7 @@ public:
         set_default_size(600, 700);
         set_border_width(10);
 
+        load_last_used_directory(); // Load the last used directory
         setup_ui();
         apply_dark_mode();
         setup_keyboard_navigation();
@@ -68,6 +70,61 @@ private:
     double current_time_seconds = 0.0;
     int current_score = 4;
     int current_bars = 1;
+    
+    Glib::ustring m_last_used_directory; // Member variable to store last used directory
+
+    // Helper to get the config file path
+    std::filesystem::path get_config_file_path() {
+        std::filesystem::path config_dir;
+        if (const char* xdg_config_home = getenv("XDG_CONFIG_HOME")) {
+            config_dir = xdg_config_home;
+        } else {
+            if (const char* home_dir = getenv("HOME")) {
+                config_dir = home_dir;
+                config_dir /= ".config";
+            } else {
+                return {}; // Cannot determine home directory
+            }
+        }
+        config_dir /= "bpmcalq";
+        if (!std::filesystem::exists(config_dir)) {
+            std::filesystem::create_directories(config_dir);
+        }
+        return config_dir / "config.ini";
+    }
+
+    // Load the last used directory from config file
+    void load_last_used_directory() {
+        std::filesystem::path config_path = get_config_file_path();
+        if (std::filesystem::exists(config_path)) {
+            std::ifstream ifs(config_path);
+            if (ifs.is_open()) {
+                std::string line;
+                if (std::getline(ifs, line)) {
+                    m_last_used_directory = line;
+                }
+                ifs.close();
+            }
+        }
+        // Default to user's home directory if not found or error
+        if (m_last_used_directory.empty()) {
+            if (const char* home_dir = getenv("HOME")) {
+                m_last_used_directory = home_dir;
+            } else {
+                m_last_used_directory = "/"; // Fallback to root
+            }
+        }
+    }
+
+    // Save the last used directory to config file
+    void save_last_used_directory(const Glib::ustring& path) {
+        std::filesystem::path config_path = get_config_file_path();
+        std::ofstream ofs(config_path);
+        if (ofs.is_open()) {
+            ofs << path << std::endl;
+            ofs.close();
+        }
+    }
 
     void setup_ui() {
         add(main_grid);
@@ -345,6 +402,11 @@ private:
         
         dialog.add_button("_Cancel", Gtk::RESPONSE_CANCEL);
         dialog.add_button("_Open", Gtk::RESPONSE_OK);
+
+        // Set the current folder for the dialog
+        if (!m_last_used_directory.empty() && std::filesystem::is_directory(m_last_used_directory.raw())) {
+            dialog.set_current_folder(m_last_used_directory);
+        }
         
         auto filter_audio = Gtk::FileFilter::create();
         filter_audio->set_name("Audio files");
@@ -361,13 +423,33 @@ private:
             std::string filename = dialog.get_filename();
             file_entry.set_text(filename);
             
-            // For now, just extract the filename to show we selected it
-            // In a real implementation, you'd use an audio library to get duration
-            std::filesystem::path path(filename);
-            time_entry.set_text("5.12"); // Example duration
-            current_time_seconds = 5.12;
-            
-            info_label.set_text("Selected: " + path.filename().string() + " (Note: Duration detection not implemented)");
+            // Save the directory of the selected file
+            m_last_used_directory = std::filesystem::path(filename).parent_path().string();
+            save_last_used_directory(m_last_used_directory);
+
+            // Use libsndfile to get the duration of the selected audio file
+            SF_INFO sfinfo;
+            SNDFILE* sndfile = sf_open(filename.c_str(), SFM_READ, &sfinfo);
+
+            if (sndfile) {
+                if (sfinfo.samplerate > 0) {
+                    double duration = (double)sfinfo.frames / sfinfo.samplerate;
+                    std::ostringstream oss;
+                    oss << std::fixed << std::setprecision(2) << duration;
+                    time_entry.set_text(oss.str());
+                    current_time_seconds = duration;
+                    info_label.set_text("Selected: " + std::filesystem::path(filename).filename().string() + " (Duration: " + oss.str() + "s)");
+                } else {
+                    info_label.set_text("Error: Invalid sample rate in " + std::filesystem::path(filename).filename().string());
+                    time_entry.set_text("0.0");
+                    current_time_seconds = 0.0;
+                }
+                sf_close(sndfile);
+            } else {
+                info_label.set_text("Error: Could not open file " + std::filesystem::path(filename).filename().string() + " (" + sf_strerror(NULL) + ")");
+                time_entry.set_text("0.0");
+                current_time_seconds = 0.0;
+            }
         }
     }
 
@@ -393,17 +475,51 @@ private:
         double beat_duration_ms = 60000.0 / bpm; // Duration of one beat in ms
         
         // Update note durations
-        note_values[0]->set_text(std::to_string(beat_duration_ms * 4).substr(0, 8) + " ms");      // Whole
-        note_values[1]->set_text(std::to_string(beat_duration_ms * 2).substr(0, 8) + " ms");      // Half
-        note_values[2]->set_text(std::to_string(beat_duration_ms * 1).substr(0, 8) + " ms");      // Quarter
-        note_values[3]->set_text(std::to_string(beat_duration_ms * 0.5).substr(0, 8) + " ms");    // Eighth
-        note_values[4]->set_text(std::to_string(beat_duration_ms * 0.25).substr(0, 8) + " ms");   // Sixteenth
-        note_values[5]->set_text(std::to_string(beat_duration_ms * 0.125).substr(0, 8) + " ms");  // Thirty-second
-        note_values[6]->set_text(std::to_string(beat_duration_ms * 0.0625).substr(0, 8) + " ms"); // Sixty-fourth
-        note_values[7]->set_text(std::to_string(beat_duration_ms * 1.5).substr(0, 8) + " ms");     // Dotted Quarter
-        note_values[8]->set_text(std::to_string(beat_duration_ms * 0.75).substr(0, 8) + " ms");    // Dotted Eighth
-        note_values[9]->set_text(std::to_string(beat_duration_ms * 0.6667).substr(0, 8) + " ms");  // Triplet Quarter
-        note_values[10]->set_text(std::to_string(beat_duration_ms * 0.3333).substr(0, 8) + " ms"); // Triplet Eighth
+        std::ostringstream oss;
+
+        oss.str(""); // Clear the stream
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 4);
+        note_values[0]->set_text(oss.str() + " ms");      // Whole
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 2);
+        note_values[1]->set_text(oss.str() + " ms");      // Half
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 1);
+        note_values[2]->set_text(oss.str() + " ms");      // Quarter
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 0.5);
+        note_values[3]->set_text(oss.str() + " ms");    // Eighth
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 0.25);
+        note_values[4]->set_text(oss.str() + " ms");   // Sixteenth
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 0.125);
+        note_values[5]->set_text(oss.str() + " ms");  // Thirty-second
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 0.0625);
+        note_values[6]->set_text(oss.str() + " ms"); // Sixty-fourth
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 1.5);
+        note_values[7]->set_text(oss.str() + " ms");     // Dotted Quarter
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 0.75);
+        note_values[8]->set_text(oss.str() + " ms");    // Dotted Eighth
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 0.6667);
+        note_values[9]->set_text(oss.str() + " ms");  // Triplet Quarter
+
+        oss.str("");
+        oss << std::fixed << std::setprecision(1) << (beat_duration_ms * 0.3333);
+        note_values[10]->set_text(oss.str() + " ms"); // Triplet Eighth
         
         // Display additional information
         std::ostringstream info;
