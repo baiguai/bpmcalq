@@ -22,10 +22,17 @@
 #include <sndfile.h>
 
 #include <glibmm/ustring.h>
+#include <gst/gst.h> // Include GStreamer header
 
 class BPMCalculator : public Gtk::Window {
 public:
-    BPMCalculator() {
+    BPMCalculator() :
+        pipeline(NULL),
+        source(NULL),
+        decoder(NULL),
+        converter(NULL),
+        sink(NULL)
+    {
         set_title("Time to BPM Calculator");
         set_default_size(600, 700);
         set_border_width(10);
@@ -38,6 +45,13 @@ public:
         signal_key_press_event().connect(sigc::mem_fun(*this, &BPMCalculator::on_key_press));
         
         show_all_children();
+    }
+
+    ~BPMCalculator() {
+        if (pipeline) {
+            gst_element_set_state(pipeline, GST_STATE_NULL);
+            gst_object_unref(pipeline);
+        }
     }
 
 private:
@@ -55,6 +69,7 @@ private:
     Gtk::Entry time_entry;
     Gtk::Entry file_entry;
     Gtk::Button browse_button;
+    Gtk::Button play_button; // Declared Play button
     Gtk::Button calculate_button;
     
     Gtk::Label bpm_label;
@@ -72,6 +87,9 @@ private:
     int current_bars = 1;
     
     Glib::ustring m_last_used_directory; // Member variable to store last used directory
+    
+    GstElement *pipeline, *source, *decoder, *converter, *sink; // GStreamer elements
+    bool is_playing = false; // To track playback state
 
     // Helper to get the config file path
     std::filesystem::path get_config_file_path() {
@@ -160,14 +178,15 @@ private:
         main_grid.attach(file_label, 0, 3, 1, 1);
         main_grid.attach(file_entry, 1, 3, 1, 1);
         main_grid.attach(browse_button, 2, 3, 1, 1);
-        main_grid.attach(calculate_button, 0, 4, 3, 1);
+        main_grid.attach(play_button, 3, 3, 1, 1); // Attached Play button
+        main_grid.attach(calculate_button, 0, 4, 4, 1); // Calculate button spans 4 columns
         
         auto separator = Gtk::manage(new Gtk::Separator(Gtk::ORIENTATION_HORIZONTAL));
-        main_grid.attach(*separator, 0, 5, 3, 1);
+        main_grid.attach(*separator, 0, 5, 4, 1); // Separator spans 4 columns
         
-        main_grid.attach(note_lengths_frame, 0, 6, 3, 1);
+        main_grid.attach(note_lengths_frame, 0, 6, 4, 1); // Frame spans 4 columns
         
-        main_grid.attach(info_label, 0, 7, 3, 1);
+        main_grid.attach(info_label, 0, 7, 4, 1); // Info label spans 4 columns
     }
 
     void setup_score_combo() {
@@ -204,6 +223,10 @@ private:
         
         browse_button.set_label("Browse...");
         browse_button.signal_clicked().connect(sigc::mem_fun(*this, &BPMCalculator::on_browse_clicked));
+
+        play_button.set_label("Play"); // Set label for Play button
+        play_button.signal_clicked().connect(sigc::mem_fun(*this, &BPMCalculator::on_play_clicked)); // Connect signal
+        play_button.set_sensitive(false); // Initially insensitive until a file is loaded
     }
 
     void setup_calculate_button() {
@@ -337,6 +360,7 @@ private:
         bars_combo.set_can_focus(true);
         time_entry.set_can_focus(true);
         browse_button.set_can_focus(true);
+        play_button.set_can_focus(true); // Added Play button to keyboard navigation
         calculate_button.set_can_focus(true);
     }
 
@@ -371,6 +395,9 @@ private:
                 return true;
             case GDK_KEY_F5:
                 calculate_button.grab_focus();
+                return true;
+            case GDK_KEY_F6: // Added F6 for Play button
+                play_button.grab_focus();
                 return true;
         }
         return false;
@@ -439,18 +466,159 @@ private:
                     time_entry.set_text(oss.str());
                     current_time_seconds = duration;
                     info_label.set_text("Selected: " + std::filesystem::path(filename).filename().string() + " (Duration: " + oss.str() + "s)");
+                    play_button.set_sensitive(true); // Enable play button
                 } else {
                     info_label.set_text("Error: Invalid sample rate in " + std::filesystem::path(filename).filename().string());
                     time_entry.set_text("0.0");
                     current_time_seconds = 0.0;
+                    play_button.set_sensitive(false); // Disable play button on error
                 }
                 sf_close(sndfile);
             } else {
                 info_label.set_text("Error: Could not open file " + std::filesystem::path(filename).filename().string() + " (" + sf_strerror(NULL) + ")");
                 time_entry.set_text("0.0");
                 current_time_seconds = 0.0;
+                play_button.set_sensitive(false); // Disable play button on error
             }
         }
+    }
+
+    void on_play_clicked() {
+        if (is_playing) {
+            // Stop playback
+            if (pipeline) {
+                gst_element_set_state(pipeline, GST_STATE_NULL);
+                gst_object_unref(pipeline);
+                pipeline = NULL;
+            }
+            play_button.set_label("Play");
+            is_playing = false;
+            info_label.set_text("Playback stopped.");
+        } else {
+            // Start playback
+            std::string filename = file_entry.get_text();
+            if (filename.empty() || !std::filesystem::exists(filename)) {
+                info_label.set_text("Error: No valid audio file selected for playback.");
+                return;
+            }
+
+            // Create the GStreamer pipeline
+            pipeline = gst_pipeline_new("audio-player-pipeline");
+            source = gst_element_factory_make("filesrc", "file-source");
+            GstElement *decodebin = gst_element_factory_make("decodebin", "decoder"); // Use decodebin
+            converter = gst_element_factory_make("audioconvert", "converter"); // Use member 'converter'
+            sink = gst_element_factory_make("autoaudiosink", "audio-sink"); // Use member 'sink'
+
+            if (!pipeline || !source || !decodebin || !converter || !sink) {
+                info_label.set_text("Error: Not all GStreamer elements could be created. Check GStreamer installation.");
+                if (pipeline) gst_object_unref(pipeline);
+                if (source) gst_object_unref(source);
+                if (decodebin) gst_object_unref(decodebin);
+                if (converter) gst_object_unref(converter);
+                if (sink) gst_object_unref(sink);
+                pipeline = NULL;
+                return;
+            }
+
+            g_object_set(G_OBJECT(source), "location", filename.c_str(), NULL);
+
+            gst_bin_add_many(GST_BIN(pipeline), source, decodebin, converter, sink, NULL);
+
+            if (!gst_element_link(source, decodebin)) { // Link source to decodebin
+                info_label.set_text("Error: Could not link source to decodebin.");
+                gst_object_unref(pipeline);
+                pipeline = NULL;
+                return;
+            }
+
+            // Connect "pad-added" signal of decodebin
+            g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), this);
+
+            // Link audioconvert to audiosink directly
+            if (!gst_element_link(converter, sink)) {
+                info_label.set_text("Error: Could not link audioconvert to audiosink.");
+                gst_object_unref(pipeline);
+                pipeline = NULL;
+                return;
+            }
+
+            // Set up bus watch
+            GstBus *bus = gst_element_get_bus(pipeline);
+            gst_bus_add_watch(bus, bus_callback, this);
+            gst_object_unref(bus);
+
+            // Start playing
+            GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
+            if (ret == GST_STATE_CHANGE_FAILURE) {
+                info_label.set_text("Error: Unable to set the pipeline to the playing state.");
+                gst_object_unref(pipeline);
+                pipeline = NULL;
+                return;
+            }
+
+            play_button.set_label("Stop");
+            is_playing = true;
+            info_label.set_text("Playing: " + std::filesystem::path(filename).filename().string());
+        }
+    }
+
+    // Static callback function for "pad-added" signal
+    static void on_pad_added(GstElement *element, GstPad *pad, gpointer data) {
+        BPMCalculator *calculator = static_cast<BPMCalculator*>(data);
+        GstPad *sink_pad = gst_element_get_static_pad(calculator->converter, "sink");
+
+        if (gst_pad_is_linked(sink_pad)) {
+            g_object_unref(sink_pad);
+            return;
+        }
+
+        GstCaps *caps = gst_pad_get_current_caps(pad);
+        const GstStructure *str = gst_caps_get_structure(caps, 0);
+
+        if (g_str_has_prefix(gst_structure_get_name(str), "audio/x-raw")) {
+            if (gst_pad_link(pad, sink_pad) != GST_PAD_LINK_OK) {
+                g_warning("Audio pad link failed.");
+            }
+        }
+        g_object_unref(sink_pad);
+        gst_caps_unref(caps);
+    }
+
+    // Static bus callback function
+    static gboolean bus_callback(GstBus *bus, GstMessage *msg, gpointer data) {
+        BPMCalculator *calculator = static_cast<BPMCalculator*>(data);
+
+        switch (GST_MESSAGE_TYPE(msg)) {
+            case GST_MESSAGE_EOS:
+                calculator->info_label.set_text("End-Of-Stream reached.");
+                if (calculator->pipeline) {
+                    gst_element_set_state(calculator->pipeline, GST_STATE_NULL);
+                    gst_object_unref(calculator->pipeline);
+                    calculator->pipeline = NULL;
+                }
+                calculator->play_button.set_label("Play");
+                calculator->is_playing = false;
+                break;
+            case GST_MESSAGE_ERROR: {
+                GError *err;
+                gchar *debug_info;
+                gst_message_parse_error(msg, &err, &debug_info);
+                calculator->info_label.set_text("Error from GStreamer: " + std::string(err->message));
+                g_error_free(err);
+                g_free(debug_info);
+                if (calculator->pipeline) {
+                    gst_element_set_state(calculator->pipeline, GST_STATE_NULL);
+                    gst_object_unref(calculator->pipeline);
+                    calculator->pipeline = NULL;
+                }
+                calculator->play_button.set_label("Play");
+                calculator->is_playing = false;
+                break;
+            }
+            default:
+                break;
+        }
+        return TRUE;
     }
 
     void on_calculate_clicked() {
@@ -541,6 +709,9 @@ private:
 };
 
 int main(int argc, char* argv[]) {
+    // Initialize GStreamer before creating the Gtk::Application
+    gst_init(&argc, &argv); 
+
     auto app = Gtk::Application::create(argc, argv, "com.example.bpmcalq");
     
     BPMCalculator calculator;

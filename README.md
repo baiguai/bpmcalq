@@ -25,7 +25,7 @@ A dark mode GUI application for calculating BPM from time duration, built with C
 
 ### Ubuntu/Debian
 ```bash
-sudo apt update && sudo apt install -y libgtkmm-3.0-dev libgtk-3-dev pkg-config libsndfile1-dev
+sudo apt update && sudo apt install -y libgtkmm-3.0-dev libgtk-3-dev pkg-config libsndfile1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-good1.0-dev
 ```
 
 ### Fedora/CentOS/RHEL
