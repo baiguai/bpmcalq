@@ -11,6 +11,7 @@
 #include <gtkmm/frame.h>
 #include <gtkmm/box.h>
 #include <gtkmm/scrolledwindow.h>
+#include <gtkmm/eventbox.h>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -74,6 +75,7 @@ private:
     
     Gtk::Label bpm_label;
     Gtk::Label bpm_value;
+    Gtk::EventBox bpm_value_event_box;
     
     Gtk::Frame note_lengths_frame;
     Gtk::Grid note_lengths_grid;
@@ -81,6 +83,7 @@ private:
     std::vector<Gtk::Label*> note_values;
     
     Gtk::Label info_label;
+    Gtk::Label file_info_label;
     
     double current_time_seconds = 0.0;
     int current_score = 4;
@@ -187,6 +190,7 @@ private:
         main_grid.attach(note_lengths_frame, 0, 6, 4, 1); // Frame spans 4 columns
         
         main_grid.attach(info_label, 0, 7, 4, 1); // Info label spans 4 columns
+        main_grid.attach(file_info_label, 0, 8, 4, 1); // File info label spans 4 columns
     }
 
     void setup_score_combo() {
@@ -247,13 +251,33 @@ private:
         bpm_value.set_halign(Gtk::ALIGN_START);
         
         note_lengths_grid.attach(bpm_label, 0, 0, 1, 1);
-        note_lengths_grid.attach(bpm_value, 1, 0, 1, 1);
-        
-        setup_note_lengths();
+        bpm_value_event_box.add(bpm_value);
+        note_lengths_grid.attach(bpm_value_event_box, 1, 0, 1, 1);
+        bpm_value_event_box.signal_button_press_event().connect([this](GdkEventButton* event) -> bool {
+                        if (event->type == GDK_2BUTTON_PRESS) {
+                            auto clipboard = Gtk::Clipboard::get();
+                            Glib::ustring text_to_copy = bpm_value.get_text();
+                            size_t pos = text_to_copy.find(" BPM");
+                                            if (pos != Glib::ustring::npos) {
+                                                text_to_copy = text_to_copy.substr(0, pos);
+                                            }
+                                            clipboard->set_text(text_to_copy);
+                                            info_label.set_text("BPM value copied to clipboard.");
+                                            Glib::signal_timeout().connect_once([this]() {
+                                                info_label.set_text("");
+                                            }, 2000);
+                                            return true; // Event handled
+                                        }
+                                        return false; // Event not handled
+                                    });        setup_note_lengths();
         
         info_label.set_text("");
         info_label.set_halign(Gtk::ALIGN_START);
         info_label.set_line_wrap(true);
+
+        file_info_label.set_text("");
+        file_info_label.set_halign(Gtk::ALIGN_START);
+        file_info_label.set_line_wrap(true);
     }
 
     void setup_note_lengths() {
@@ -272,7 +296,27 @@ private:
             auto* value = Gtk::manage(new Gtk::Label("0.00 ms"));
             value->set_halign(Gtk::ALIGN_START);
             note_values.push_back(value);
-            note_lengths_grid.attach(*value, 1, i + 1, 1, 1);
+            
+            auto* event_box = Gtk::manage(new Gtk::EventBox());
+            event_box->add(*value);
+            event_box->signal_button_press_event().connect([this, value](GdkEventButton* event) -> bool {
+                if (event->type == GDK_2BUTTON_PRESS) {
+                    auto clipboard = Gtk::Clipboard::get();
+                    Glib::ustring text_to_copy = value->get_text();
+                    size_t pos = text_to_copy.find(" ms");
+                    if (pos != Glib::ustring::npos) {
+                        text_to_copy = text_to_copy.substr(0, pos);
+                    }
+                    clipboard->set_text(text_to_copy);
+                    info_label.set_text("Copied " + text_to_copy.raw() + " to clipboard.");
+                    Glib::signal_timeout().connect_once([this]() {
+                        info_label.set_text("");
+                    }, 2000);
+                    return true;
+                }
+                return false;
+            });
+            note_lengths_grid.attach(*event_box, 1, i + 1, 1, 1);
         }
     }
 
@@ -465,10 +509,13 @@ private:
                     oss << std::fixed << std::setprecision(2) << duration;
                     time_entry.set_text(oss.str());
                     current_time_seconds = duration;
-                    info_label.set_text("Selected: " + std::filesystem::path(filename).filename().string() + " (Duration: " + oss.str() + "s)");
+                    file_info_label.set_text("Selected: " + std::filesystem::path(filename).filename().string() + " (Duration: " + oss.str() + "s)");
                     play_button.set_sensitive(true); // Enable play button
                 } else {
                     info_label.set_text("Error: Invalid sample rate in " + std::filesystem::path(filename).filename().string());
+                    Glib::signal_timeout().connect_once([this]() {
+                        info_label.set_text("");
+                    }, 2000);
                     time_entry.set_text("0.0");
                     current_time_seconds = 0.0;
                     play_button.set_sensitive(false); // Disable play button on error
@@ -476,6 +523,9 @@ private:
                 sf_close(sndfile);
             } else {
                 info_label.set_text("Error: Could not open file " + std::filesystem::path(filename).filename().string() + " (" + sf_strerror(NULL) + ")");
+                Glib::signal_timeout().connect_once([this]() {
+                    info_label.set_text("");
+                }, 2000);
                 time_entry.set_text("0.0");
                 current_time_seconds = 0.0;
                 play_button.set_sensitive(false); // Disable play button on error
@@ -494,11 +544,17 @@ private:
             play_button.set_label("Play");
             is_playing = false;
             info_label.set_text("Playback stopped.");
+            Glib::signal_timeout().connect_once([this]() {
+                info_label.set_text("");
+            }, 2000);
         } else {
             // Start playback
             std::string filename = file_entry.get_text();
             if (filename.empty() || !std::filesystem::exists(filename)) {
                 info_label.set_text("Error: No valid audio file selected for playback.");
+                Glib::signal_timeout().connect_once([this]() {
+                    info_label.set_text("");
+                }, 2000);
                 return;
             }
 
@@ -511,6 +567,9 @@ private:
 
             if (!pipeline || !source || !decodebin || !converter || !sink) {
                 info_label.set_text("Error: Not all GStreamer elements could be created. Check GStreamer installation.");
+                Glib::signal_timeout().connect_once([this]() {
+                    info_label.set_text("");
+                }, 2000);
                 if (pipeline) gst_object_unref(pipeline);
                 if (source) gst_object_unref(source);
                 if (decodebin) gst_object_unref(decodebin);
@@ -526,6 +585,9 @@ private:
 
             if (!gst_element_link(source, decodebin)) { // Link source to decodebin
                 info_label.set_text("Error: Could not link source to decodebin.");
+                Glib::signal_timeout().connect_once([this]() {
+                    info_label.set_text("");
+                }, 2000);
                 gst_object_unref(pipeline);
                 pipeline = NULL;
                 return;
@@ -537,6 +599,9 @@ private:
             // Link audioconvert to audiosink directly
             if (!gst_element_link(converter, sink)) {
                 info_label.set_text("Error: Could not link audioconvert to audiosink.");
+                Glib::signal_timeout().connect_once([this]() {
+                    info_label.set_text("");
+                }, 2000);
                 gst_object_unref(pipeline);
                 pipeline = NULL;
                 return;
@@ -551,6 +616,9 @@ private:
             GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
             if (ret == GST_STATE_CHANGE_FAILURE) {
                 info_label.set_text("Error: Unable to set the pipeline to the playing state.");
+                Glib::signal_timeout().connect_once([this]() {
+                    info_label.set_text("");
+                }, 2000);
                 gst_object_unref(pipeline);
                 pipeline = NULL;
                 return;
@@ -559,6 +627,9 @@ private:
             play_button.set_label("Stop");
             is_playing = true;
             info_label.set_text("Playing: " + std::filesystem::path(filename).filename().string());
+            Glib::signal_timeout().connect_once([this]() {
+                info_label.set_text("");
+            }, 2000);
         }
     }
 
@@ -591,6 +662,9 @@ private:
         switch (GST_MESSAGE_TYPE(msg)) {
             case GST_MESSAGE_EOS:
                 calculator->info_label.set_text("End-Of-Stream reached.");
+                Glib::signal_timeout().connect_once([calculator]() {
+                    calculator->info_label.set_text("");
+                }, 2000);
                 if (calculator->pipeline) {
                     gst_element_set_state(calculator->pipeline, GST_STATE_NULL);
                     gst_object_unref(calculator->pipeline);
@@ -604,6 +678,9 @@ private:
                 gchar *debug_info;
                 gst_message_parse_error(msg, &err, &debug_info);
                 calculator->info_label.set_text("Error from GStreamer: " + std::string(err->message));
+                Glib::signal_timeout().connect_once([calculator]() {
+                    calculator->info_label.set_text("");
+                }, 2000);
                 g_error_free(err);
                 g_free(debug_info);
                 if (calculator->pipeline) {
@@ -624,6 +701,9 @@ private:
     void on_calculate_clicked() {
         if (current_time_seconds <= 0) {
             info_label.set_text("Please enter a valid time duration");
+            Glib::signal_timeout().connect_once([this]() {
+                info_label.set_text("");
+            }, 2000);
             return;
         }
         
@@ -704,7 +784,7 @@ private:
         else if (bpm < 200) info << "Presto";
         else info << "Prestissimo";
         
-        info_label.set_text(info.str());
+        file_info_label.set_text(info.str());
     }
 };
 
